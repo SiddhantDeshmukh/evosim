@@ -1,10 +1,89 @@
-use std::f32::consts::PI;
+use std::{collections::HashMap, f32::consts::PI};
 
 use ::rand::{Rng, rngs::ThreadRng};
 use macroquad::prelude::*;
 
+// Traits
+pub trait HasPosition {
+    fn position(&self) -> Vec2;
+}
+
+// Enums
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    Food(usize),
+    Creature(usize),
+    Position(Vec2),
+}
+
+impl Target {
+    pub fn position(&self, world: &World) -> Option<Vec2> {
+        match self {
+            Target::Creature(id) => world.creatures.get(id).map(|c| c.position),
+            Target::Food(id) => world.food_sources.get(id).map(|f| f.position),
+            Target::Position(pos) => Some(*pos),
+        }
+    }
+}
+
+// Structs
+
+pub struct World {
+    pub next_id: usize, // every entity has an ID, the ID space is shared
+    pub creatures: HashMap<usize, Creature>, // all creatures
+    pub food_sources: HashMap<usize, FoodSource>, // all food sources
+    pub params: Params, // simulation params
+    pub bounds: Bounds, // world boundaries
+}
+
+impl World {
+    pub fn new(
+        creatures: Vec<Creature>,
+        food_sources: Vec<FoodSource>,
+        params: Params,
+        bounds: Bounds,
+    ) -> Self {
+        let mut world = World {
+            next_id: 0,
+            creatures: HashMap::new(),
+            food_sources: HashMap::new(),
+            params,
+            bounds,
+        };
+
+        for creature in creatures {
+            world.add_creature(creature);
+        }
+
+        for food_source in food_sources {
+            world.add_food_source(food_source);
+        }
+
+        world
+    }
+    pub fn add_creature(&mut self, creature: Creature) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.creatures.insert(id, creature);
+        id
+    }
+
+    pub fn add_food_source(&mut self, food_source: FoodSource) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.food_sources.insert(id, food_source);
+        id
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FoodSource {
+    /*
+     * A FoodSource is a (currently omnivorous) place where creatures flock to
+     * if they are hungry. Eating is not currently implemented, but in theory
+     * when creatures eat, they subtract amounts from the food source and the
+     * food source amount updates.
+     */
     pub position: Vec2,
     pub max_amount: f32,
     pub amount: f32,
@@ -31,9 +110,11 @@ pub struct Creature {
     pub hunger: f32,
     pub hunger_threshold: f32,
     pub hunger_rate: f32,
-    // TODO: Add different shapes for evolutionary stuff
+    // TODO: Add different shapes for evolutionary stuff, create a "size" for
+    // visual clarity on how beeg the creature is
+    // Also need to add HP for combat
     pub color: Color,
-    pub movement_target: Option<Vec2>, // TODO: change to be any struct
+    pub movement_target: Option<Target>,
 }
 
 impl Creature {
@@ -65,14 +146,21 @@ impl Creature {
         }
     }
 
-    fn move_to_target(&mut self, params: &Params) {
+    fn move_to_target(&mut self, world: &World) {
         // Move towards the movement_target
         // NOTE: Setting '5' as the threshold for "close enough"
         let to_target: Vec2;
         let squared_distance: f32;
+        // First unwrap: if Target not None
         if let Some(target) = self.movement_target {
-            to_target = target - self.position;
-            squared_distance = to_target.length_squared();
+            // Second unwrap: if Target ID still exists in the world
+            if let Some(target_pos) = target.position(world) {
+                to_target = target_pos - self.position;
+                squared_distance = to_target.length_squared();
+            } else {
+                // No target, should actually remove the target here?
+                return;
+            }
         } else {
             // No target
             return;
@@ -97,7 +185,7 @@ impl Creature {
         self.velocity += steering_clamped;
         self.velocity = self.velocity.clamp_length_max(self.max_speed());
 
-        self.position += self.velocity * params.timestep;
+        self.position += self.velocity * world.params.timestep;
     }
 }
 
@@ -122,6 +210,7 @@ impl Default for Params {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Bounds {
     pub x_min: f32,
     pub x_max: f32,
@@ -169,22 +258,24 @@ fn update_hunger(creature: &mut Creature) {
     creature.hunger = creature.hunger.clamp(0., 100.);
 }
 
-fn find_food(creature: &mut Creature, food_sources: &[FoodSource]) {
+fn find_food(creature: &mut Creature, world: &World) {
     // Move towards closest food source if hungry
-    let mut nearest_food = &food_sources[0];
-    let mut distance = 1e6;
-    for food in food_sources {
-        let food_dist = creature.distance_to_food(food);
+    let mut nearest_food: Option<(usize, &FoodSource)> = None;
+    let mut distance = f32::MAX;
+    for (id, food) in &world.food_sources {
+        let food_dist = creature.distance_to_food(&food);
         if food_dist < distance {
             distance = food_dist;
-            nearest_food = food;
+            nearest_food = Some((*id, &food));
         }
     }
 
-    creature.movement_target = Some(nearest_food.position);
+    if let Some((food_id, _)) = nearest_food {
+        creature.movement_target = Some(Target::Food(food_id));
+    }
 }
 
-fn find_random_walk_target(rng: &mut ThreadRng, creature: &mut Creature) {
+fn find_random_walk_target(rng: &mut ThreadRng, creature: &mut Creature, world: &World) {
     // Set a target in a cone somewhere in front of the creature if we don't
     // have a target already
     if creature.movement_target.is_some() {
@@ -197,14 +288,19 @@ fn find_random_walk_target(rng: &mut ThreadRng, creature: &mut Creature) {
     // facing to determine the offset
     let dx = distance * angle.cos();
     let dy = distance * angle.sin();
+    // TODO: Check if in world bounds (just write a function that caps any Vec2
+    // to the stored world bounds)
+    let target_pos = creature.position + Vec2::new(dx, dy);
 
-    creature.movement_target = Some(creature.position + Vec2::new(dx, dy));
+    creature.movement_target = Some(Target::Position(target_pos));
     println!("New movemment target is {:?}", creature.movement_target);
 }
 
-fn apply_bc(creature: &mut Creature, params: &Params, bounds: &Bounds) {
+fn apply_bc(creature: &mut Creature, world: &World) {
     // For now, just repel creatures from the border
     let mut force = Vec2::ZERO;
+    let params = world.params;
+    let bounds = world.bounds;
     // Force strength is just the distnace to the edge
     if creature.position.x < bounds.x_min + params.padding {
         force.x += params.padding - (creature.position.x - bounds.x_min).max(1.0);
@@ -222,59 +318,52 @@ fn apply_bc(creature: &mut Creature, params: &Params, bounds: &Bounds) {
     creature.position += creature.velocity * params.timestep;
 }
 
-pub fn update_world(
-    rng: &mut ThreadRng,
-    params: &Params,
-    bounds: &Bounds,
-    food_sources: &[FoodSource],
-    creatures: &[Creature],
-) -> (Vec<FoodSource>, Vec<Creature>) {
-    let new_food_sources = update_food_sources(rng, params, food_sources);
-    let new_creatures = update_creatures(rng, params, bounds, food_sources, creatures);
-    (new_food_sources, new_creatures)
+pub fn update_world(rng: &mut ThreadRng, world: &mut World) {
+    update_food_sources(rng, world);
+    update_creatures(rng, world);
 }
 
-fn update_food_sources(
-    rng: &mut ThreadRng,
-    params: &Params,
-    food_sources: &[FoodSource],
-) -> Vec<FoodSource> {
-    food_sources
-        .iter()
-        .map(|f1| {
-            let mut new_f = *f1;
-            new_f
-        })
-        .collect()
+fn update_food_sources(rng: &mut ThreadRng, world: &mut World) {
+    for (_id, food) in world.food_sources.iter_mut() {
+        // We can regrow food later, for now we are not doing anything
+    }
 }
 
-fn update_creatures(
-    rng: &mut ThreadRng,
-    params: &Params,
-    bounds: &Bounds,
-    food_sources: &[FoodSource],
-    creatures: &[Creature],
-) -> Vec<Creature> {
-    creatures
-        .iter()
-        .map(|c1| {
-            let mut new_c = *c1;
-            update_hunger(&mut new_c);
-            if new_c.is_hungry() {
-                println!("Creature {:?} is finding food", new_c);
-                find_food(&mut new_c, food_sources);
-            } else {
-                // Target is some random point kinda in front of the creature
-                // to make it random walk
-                println!("Creature {:?} is random walking", new_c);
-                find_random_walk_target(rng, &mut new_c);
-            }
-            new_c.move_to_target(params);
-            apply_bc(&mut new_c, params, bounds);
-            new_c.update_facing();
-            new_c
-        })
-        .collect()
+fn update_creatures(rng: &mut ThreadRng, world: &mut World) {
+    // Collect all creature IDs, then create new creatures (re-inserting into
+    // the hashmap); only works because structs are simple
+    let creature_ids: Vec<usize> = world.creatures.keys().cloned().collect();
+
+    for id in creature_ids {
+        let mut creature = world.creatures[&id];
+        update_hunger(&mut creature);
+        if creature.is_hungry() {
+            find_food(&mut creature, world);
+        } else {
+            find_random_walk_target(rng, &mut creature, world);
+        }
+        creature.move_to_target(world);
+        apply_bc(&mut creature, world);
+        creature.update_facing();
+        world.creatures.insert(id, creature); // Replace the old creature
+    }
+
+    // The mutable version the borrow checker hates:
+    // for (_id, creature) in world.creatures.iter_mut() {
+    //     update_hunger(creature);
+    //     if creature.is_hungry() {
+    //         // println!("Creature {:?} is finding food", creature);
+    //         find_food(creature, world);
+    //     } else {
+    //         // Target is some random point kinda in front of the creature
+    //         // to make it random walk
+    //         // println!("Creature {:?} is random walking", creature);
+    //         find_random_walk_target(rng, creature, world);
+    //     }
+    //     creature.move_to_target(world);
+    //     apply_bc(creature, world);
+    //     creature.update_facing();
+    // }
 }
 
 /*
