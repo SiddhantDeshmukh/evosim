@@ -339,36 +339,37 @@ fn update_creatures(rng: &mut ThreadRng, world: &mut World) {
     // the hashmap); only works because structs are simple
     let creature_ids: Vec<usize> = world.creatures.keys().cloned().collect();
 
-    for id in creature_ids {
-        let mut creature = world.creatures[&id];
-        update_hunger(&mut creature, world);
-        if creature.is_hungry() && creature.movement_target.is_none() {
-            find_food(&mut creature, world);
-        } else {
-            find_random_walk_target(rng, &mut creature, world);
-        }
-        creature.move_to_target(world);
-        apply_bc(&mut creature, world);
-        creature.update_facing();
-        world.creatures.insert(id, creature); // Replace the old creature
-    }
-
-    // The mutable version the borrow checker hates:
-    // for (_id, creature) in world.creatures.iter_mut() {
-    //     update_hunger(creature, world);
-    //     if creature.is_hungry() {
-    //         // println!("Creature {:?} is finding food", creature);
-    //         find_food(creature, world);
+    // for id in creature_ids {
+    //     // let mut creature = world.creatures[&id];
+    //     let mut creature = world.creatures[&id];
+    //     update_hunger(&mut creature, world);
+    //     if creature.is_hungry() && creature.movement_target.is_none() {
+    //         find_food(&mut creature, world);
     //     } else {
-    //         // Target is some random point kinda in front of the creature
-    //         // to make it random walk
-    //         // println!("Creature {:?} is random walking", creature);
-    //         find_random_walk_target(rng, creature, world);
+    //         find_random_walk_target(rng, &mut creature, world);
     //     }
     //     creature.move_to_target(world);
-    //     apply_bc(creature, world);
+    //     apply_bc(&mut creature, world);
     //     creature.update_facing();
+    //     world.creatures.insert(id, creature); // Replace the old creature
     // }
+
+    // The mutable version the borrow checker hates:
+    for (_id, creature) in world.creatures.iter_mut() {
+        update_hunger(creature, world);
+        if creature.is_hungry() {
+            // println!("Creature {:?} is finding food", creature);
+            find_food(creature, world);
+        } else {
+            // Target is some random point kinda in front of the creature
+            // to make it random walk
+            // println!("Creature {:?} is random walking", creature);
+            find_random_walk_target(rng, creature, world);
+        }
+        creature.move_to_target(world);
+        apply_bc(creature, world);
+        creature.update_facing();
+    }
 }
 
 /*

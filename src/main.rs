@@ -15,7 +15,7 @@ fn reset(rng: &mut ThreadRng) -> World {
     };
 
     let num_food: usize = 10;
-    let num_creatures: usize = 5;
+    let num_creatures: usize = 20;
     let food_sources: Vec<FoodSource> = (0..num_food)
         .map(|_| FoodSource::new_rand(rng, &bounds))
         .collect::<Vec<FoodSource>>();
