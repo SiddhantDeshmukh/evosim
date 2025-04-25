@@ -2,28 +2,38 @@ use std::f32::consts::PI;
 
 use ::rand::rngs::ThreadRng;
 use evosim::*;
-use macroquad::prelude::*;
+use macroquad::{
+    miniquad::window::{set_window_position, set_window_size},
+    prelude::*,
+};
 
 fn reset(rng: &mut ThreadRng) -> World {
     // Initialise parameters
     let params = Params::default();
     let bounds = Bounds {
         x_min: 0.,
-        x_max: screen_width(),
+        x_max: params.window_width,
         y_min: 0.,
-        y_max: screen_height(),
+        y_max: params.window_height,
     };
 
-    let num_food: usize = 10;
+    // Spawn in food sources
+    let num_plant: usize = 10;
+    let num_meat: usize = 5;
+    let plant_sources: Vec<PlantSource> = (0..num_plant)
+        .map(|_| PlantSource::new_rand(rng, &bounds))
+        .collect::<Vec<PlantSource>>();
+    let meat_sources: Vec<MeatSource> = (0..num_meat)
+        .map(|_| MeatSource::new_rand(rng, &bounds))
+        .collect::<Vec<MeatSource>>();
+
+    // Spawn in creatures
     let num_creatures: usize = 20;
-    let food_sources: Vec<FoodSource> = (0..num_food)
-        .map(|_| FoodSource::new_rand(rng, &bounds))
-        .collect::<Vec<FoodSource>>();
     let creatures: Vec<Creature> = (0..num_creatures)
         .map(|_| random_creature(rng, &bounds))
         .collect::<Vec<Creature>>();
 
-    World::new(creatures, food_sources, params, bounds)
+    World::new(creatures, plant_sources, meat_sources, params, bounds)
 }
 
 fn draw_fps(x: f32, y: f32, font_size: f32) {
@@ -34,6 +44,17 @@ fn draw_fps(x: f32, y: f32, font_size: f32) {
         _ => GREEN,
     };
     draw_text(format!("FPS: {}", fps).as_str(), x, y, font_size, c);
+}
+
+fn draw_ui(x: f32, y: f32, font_size: f32, world: &World) {
+    let ui_text = format!(
+        "Current time = {:.2}, dt = {:.2e}, food regrow timer = {:.2}, regrow frequency = {:.2}",
+        world.params.time,
+        world.params.timestep,
+        world.params.plant_regrow_timer,
+        world.params.plant_regrow_freq
+    );
+    draw_text(ui_text.as_str(), x, y, font_size, BLACK);
 }
 
 fn lerp_color(c1: Color, c2: Color, s: f32) -> Color {
@@ -50,6 +71,16 @@ async fn main() {
     // Initial setup
     let mut rng: ThreadRng = ::rand::rng();
     let mut world = reset(&mut rng);
+    set_window_position(1000, 0);
+    set_window_size(
+        world.params.window_width as u32,
+        world.params.window_height as u32,
+    );
+    // Define colors for world objects (not creatures)
+    let light_blue = Color::new(0.5, 0.8, 1.0, 1.0);
+    let dark_blue = Color::new(0.0, 0.2, 0.5, 1.0);
+    let plant_color = Color::new(0.3, 0.7, 0.6, 1.0); // sea green
+    let meat_color = Color::new(1.0, 0.6, 0.6, 1.0); // salmon
     // let mut is_paused = false;
     // Main render loop
     loop {
@@ -59,9 +90,8 @@ async fn main() {
         let params = world.params;
         // Background (clear then overwrite with ocean)
         clear_background(BLACK);
-        let light_blue = Color::new(0.5, 0.8, 1.0, 1.0);
-        let dark_blue = Color::new(0.0, 0.2, 0.5, 1.0);
-        let step = (world.params.window_height / 20.0) as usize;
+        // Smaller steps (dividing by bigger number) create finer bars
+        let step = (world.params.window_height / 50.0) as usize;
         // Draw a rectangle of step-px lines by interpolating lightblue -> darkblue
         for y in (0..params.window_height as i32).step_by(step) {
             let color = lerp_color(light_blue, dark_blue, y as f32 / params.window_height);
@@ -81,19 +111,29 @@ async fn main() {
             params.window_width,
             params.window_height,
             step as f32,
-            dark_blue,
+            Color::new(0.95, 0.74, 0.15, 0.8),
         );
         //
         // Update world state
         update_world(&mut rng, &mut world);
 
-        // Render food sources
-        for food in world.food_sources.values() {
+        // Render plant sources
+        for plant in world.plant_sources.values() {
             draw_circle(
-                food.position.x,
-                food.position.y,
-                food.amount / food.max_amount * 8.,
-                GREEN,
+                plant.position.x,
+                plant.position.y,
+                plant.amount / plant.max_amount * 8.,
+                plant_color,
+            )
+        }
+
+        // Render meat sources
+        for meat in world.meat_sources.values() {
+            draw_circle(
+                meat.position.x,
+                meat.position.y,
+                meat.amount / meat.max_amount * 8.,
+                meat_color,
             )
         }
 
@@ -111,6 +151,14 @@ async fn main() {
 
         // Final draw, move to next frame
         draw_fps(params.window_width - 120., 20., 32.);
+        draw_ui(0., 20., 32., &world);
+        world.params.plant_regrow_timer += params.timestep;
+        world.params.time += params.timestep;
         next_frame().await
     }
 }
+
+/*
+* TODO:
+*
+*/
