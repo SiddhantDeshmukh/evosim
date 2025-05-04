@@ -102,6 +102,8 @@ pub struct PlantSource {
     pub velocity: Vec2,
     pub max_amount: f32,
     pub amount: f32,
+    pub regrow_freq: f32, // how likely the plant is to spread each timestep (percent chance)
+    pub regrow_amount: f32, // how much the plant regrows in a timestep
 }
 
 impl PlantSource {
@@ -112,6 +114,8 @@ impl PlantSource {
             velocity: Vec2::ZERO,
             max_amount,
             amount: max_amount,
+            regrow_freq: rng.random_range(1e-5..5e-5),
+            regrow_amount: rng.random_range(0.0..1.0),
         }
     }
 }
@@ -145,9 +149,12 @@ impl MeatSource {
 pub struct Creature {
     pub position: Vec2, // position in worldspace
     pub velocity: Vec2, // velocity in px space
-    pub facing: f32,    // facing angle in radians
-    pub strength: f32,
+    // pub size: f32,      // creature size (for rendering and life stage)
+    // pub age: f32,       // age affects other attributes, past a threshold, older creatures are more
+    // likely to die, and creatures must be a certain age before reproducing
+    // pub strength: f32,
     pub dexterity: f32,
+    pub facing: f32, // facing angle in radians
     pub hunger: f32,
     pub hunger_threshold: f32,
     pub hunger_rate: f32,
@@ -324,18 +331,20 @@ pub fn rvec2_range(rng: &mut ThreadRng, bounds: &Bounds) -> Vec2 {
 
 // Random generation
 pub fn random_creature(rng: &mut ThreadRng, bounds: &Bounds) -> Creature {
-    // TODO: different color for each species
+    // TODO: different color, max age, size, shape for each species
     let _colors = [WHITE, BLUE, BROWN, GOLD, RED];
     let position = rvec2_range(rng, bounds);
+    let hunger = rng.random_range(10.0..100.0);
     Creature {
+        // TODO: include some "size" param
         position,
         velocity: vec2(0., 0.),
         facing: 0.,
-        strength: 1.,
+        // strength: 1.,
         dexterity: 1.,
-        hunger: 100.,
-        hunger_rate: rng.random_range(0.01..0.1),
-        hunger_threshold: rng.random_range(25.0..75.0),
+        hunger,
+        hunger_rate: rng.random_range(1e-4..1e-3),
+        hunger_threshold: rng.random_range(0.25 * hunger..0.75 * hunger),
         color: _colors[rng.random_range(0.._colors.len())],
         movement_target: None,
     }
@@ -347,7 +356,7 @@ fn update_hunger(creature: &mut Creature, world: &World) {
     // Testing different scaling factors so that the creatures don't spend all
     // their time looking for food
     creature.hunger -=
-        (0.01 + 0.1 * creature.hunger_rate * creature.square_speed()) * world.params.timestep;
+        (0.01 + 0.25 * creature.hunger_rate * creature.square_speed()) * world.params.timestep;
     creature.hunger = creature.hunger.clamp(0., 100.);
 }
 
@@ -421,53 +430,82 @@ fn apply_bc(creature: &mut Creature, world: &World) {
 }
 
 pub fn update_world(rng: &mut ThreadRng, world: &mut World) {
-    update_food_sources(rng, world);
+    let new_food_sources = update_food_sources(rng, world);
     update_creatures(rng, world);
-}
 
-fn update_food_sources(rng: &mut ThreadRng, world: &mut World) {
-    // Plant sources
-    for (_id, plant) in world.plant_sources.iter_mut() {
-        // Regrow plant
-        if plant.amount < plant.max_amount {
-            let regrow_amount = rng.random_range(0.0..1.0) * world.params.timestep;
-            plant.amount = clamp(plant.amount + regrow_amount, 0.0, plant.max_amount);
-        }
-
-        // Let them drift down and around as long as they are not on the ground
-        // Positive y is down (game dev / 10)
-        if plant.position.y <= world.bounds.y_max - world.params.padding {
-            // Some random drift and gravity for y
-            plant.velocity.y +=
-                rng.random_range(-1.0..5.0) * world.params.timestep * world.params.damping
-                    / plant.amount;
-            // plant.velocity.y += world.params.timestep * world.params.damping * plant.amount;
-            // Clamp to some terminal velocity
-            plant.velocity.y = clamp(
-                plant.velocity.y,
-                -world.params.food_terminal_velocity,
-                world.params.food_terminal_velocity,
-            );
-            plant.position += plant.velocity * world.params.timestep;
-        } else {
-            plant.velocity.y = 0.
-        }
-
-        plant.velocity.x +=
-            rng.random_range(-0.1..0.1) * world.params.timestep * world.params.damping
-                / plant.amount;
-        plant.position.x += plant.velocity.x * world.params.timestep;
-    }
-
-    // Regrow a random amount of plant
-    // TODO: change this to have each plant have a chance of spreading
-    if world.params.plant_regrow_timer >= world.params.plant_regrow_freq {
-        world.params.plant_regrow_timer = 0.;
-        for _ in 0..rng.random_range(1..5) {
-            let plant_source = PlantSource::new_rand(rng, &world.bounds);
+    // Add the new plant sources (borrow checker!)
+    if !new_food_sources.is_empty() {
+        for plant_source in new_food_sources {
             world.add_plant_source(plant_source);
         }
     }
+}
+
+// TODO: Create 2 functions to update plant and meat sources separately (and turning dead creatures
+// into meat sources will need to be handled)
+fn update_food_sources(rng: &mut ThreadRng, world: &mut World) -> Vec<PlantSource> {
+    // Plant sources
+    let mut new_plants: Vec<PlantSource> = Vec::new();
+    for (_id, plant) in world.plant_sources.iter_mut() {
+        // Regrow plant
+        if plant.amount < plant.max_amount {
+            plant.amount = clamp(
+                plant.amount + plant.regrow_amount * world.params.timestep,
+                0.0,
+                plant.max_amount,
+            );
+        }
+
+        // Check for plant reproduction
+        if rng.random::<f32>() <= plant.regrow_freq {
+            // Pick a position somewhat nearby, create a new plant resource
+            // with an amount of '1' and random attributes
+
+            new_plants.push(PlantSource {
+                position: Vec2 {
+                    x: plant.position.x + rng.random_range(-5.0..5.0),
+                    y: plant.position.y + rng.random_range(-5.0..5.0),
+                },
+                velocity: Vec2::ZERO,
+                max_amount: rng.random_range(50.0..100.0),
+                amount: 1.,
+                regrow_freq: plant.regrow_freq,
+                regrow_amount: plant.regrow_amount,
+            });
+        }
+
+        // Let them drift (y clamped for ground)
+        plant.velocity.x +=
+            rng.random_range(-0.5..0.5) * world.params.timestep * world.params.damping
+                / plant.amount;
+        plant.position.x += plant.velocity.x * world.params.timestep;
+        // Positive y is down (game dev / 10)
+        // TODO: figure out a more natural behaviour, lighter stuff is more
+        // likely to move but currently things drift down too fast, might
+        // need to weight the distribution so it's not just uniform?
+        plant.velocity.y +=
+            rng.random_range(-1.0..2.0) * world.params.timestep * world.params.damping
+                / plant.amount;
+        // Clamp to some terminal velocity
+        plant.velocity.y = clamp(
+            plant.velocity.y,
+            -world.params.food_terminal_velocity,
+            world.params.food_terminal_velocity,
+        );
+        plant.position += plant.velocity * world.params.timestep;
+        if plant.position.y > world.bounds.y_max + world.params.padding {
+            plant.position.y = world.bounds.y_max + world.params.padding;
+        }
+    }
+
+    // Regrow a random amount of plant (deprecated once plants can spread)
+    // if world.params.plant_regrow_timer >= world.params.plant_regrow_freq {
+    //     world.params.plant_regrow_timer = 0.;
+    //     for _ in 0..rng.random_range(1..5) {
+    //         let plant_source = PlantSource::new_rand(rng, &world.bounds);
+    //         world.add_plant_source(plant_source);
+    //     }
+    // }
 
     // Meat sources
     for (_id, meat) in world.meat_sources.iter_mut() {
@@ -494,6 +532,8 @@ fn update_food_sources(rng: &mut ThreadRng, world: &mut World) {
             rng.random_range(-0.1..0.1) * world.params.timestep * world.params.damping;
         meat.position.x += meat.velocity.x * world.params.timestep;
     }
+
+    new_plants
 }
 
 fn update_creatures(rng: &mut ThreadRng, world: &mut World) {
@@ -539,12 +579,12 @@ fn update_creatures(rng: &mut ThreadRng, world: &mut World) {
 
 /*
 * TODO:
-* - Have food spawn and slowly float down from above, resting at bottom
-* - Also, food should have a chance to spread (like algae) around it
 * - Add species that have different attributes (currently all creatures are
-* identical)
+* identical); each species can be its own hashmap, or we can have a hashmap of
+* hashmaps
 * - Add reproduction to pass on traits
 * - Add hunting & predators
-* - Add carnivorous food sources (dead creatures turn into those), will allow
-* - scavenging behavior
+* - Fix the food-chasing behaviour so that creatures don't chase food around
+* without eating (something to do with acceleration?); generally, give them
+* better movement
 */
